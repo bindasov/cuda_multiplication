@@ -3,6 +3,7 @@
 #include <iostream>
 #include <string>
 #include <cmath>
+#include <ctime>
 
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
@@ -31,7 +32,7 @@ size_type reverse(size_type n, size_type mod) {
     return binary_pow(n, mod - 2, mod);
 }
 
-void print_vector(const std::string &name, const size_type *vec, size_type size, bool polynomial) {
+void print_array(const std::string &name, const size_type *vec, size_type size, bool polynomial) {
     std::cout << name << ": ";
     for (auto i = 0; i < size; i++) {
         if (polynomial) {
@@ -55,43 +56,6 @@ void check_error(cudaError_t err) {
     }
 }
 
-void fft(std::vector<size_type> &a, bool invert) {
-    int n = (int)a.size();
-
-    for (int i = 1, j = 0; i < n; ++i) {
-        int bit = n >> 1;
-        for (; j >= bit; bit >>= 1)
-            j -= bit;
-        j += bit;
-        if (i < j)
-            std::swap(a[i], a[j]);
-    }
-    //print_vector("bit_reversal vector", a.data(), n, false);
-
-    for (int len = 2; len <= n; len <<= 1) {
-        int wlen = invert ? reverse(ROOT, MOD) : ROOT;
-        for (int i = len; i < n; i <<= 1)
-            wlen = int(wlen * 1ll * wlen % MOD);
-        //std::cout << "len = " << len << " wlen = " << wlen << std::endl;
-        for (int i = 0; i < n; i += len) {
-            int w = 1;
-            for (int j = 0; j < len / 2; ++j) {
-                int u = a[i + j], v = int(a[i + j + len / 2] * 1ll * w % MOD);
-                a[i + j] = u + v < MOD ? u + v : u + v - MOD;
-                a[i + j + len / 2] = u - v >= 0 ? u - v : u - v + MOD;
-                w = int(w * 1ll * wlen % MOD);
-            }
-        }
-        // print_vector("fft_butterflies len " + std::to_string(len), a.data(), n, false);
-    }
-
-    if (invert) {
-        int nrev = reverse(n, MOD);
-        for (int i = 0; i < n; ++i)
-            a[i] = int(a[i] * 1ll * nrev % MOD);
-    }
-}
-
 __global__ void bit_reversal(size_type *vec, size_type size, size_type sizeLog2) {
     for (auto i = blockIdx.x * blockDim.x + threadIdx.x; i < size; i += blockDim.x * gridDim.x) {
         auto bitsNumber = sizeof(i) * 8;
@@ -108,7 +72,7 @@ __global__ void bit_reversal(size_type *vec, size_type size, size_type sizeLog2)
     }
 }
 
-__global__ void fft_butterflies(size_type *vec, size_type size, size_type len, size_type wlen) {
+__global__ void fft_butterflies(size_type *vec, size_type size, size_type len, size_type w_len) {
     for (auto i = blockIdx.x * blockDim.x + threadIdx.x; i < size && i % len == 0; i += blockDim.x * gridDim.x) {
         size_type w = 1;
         auto half_len = len / 2;
@@ -117,7 +81,7 @@ __global__ void fft_butterflies(size_type *vec, size_type size, size_type len, s
             auto u = vec[i + j];
             vec[i + j] = (u + t) % MOD;
             vec[i + j + half_len] = u >= t ? u - t : u - t + MOD;
-            w = w * 1ul * wlen % MOD;
+            w = w * 1ul * w_len % MOD;
         }
     }
 }
@@ -132,22 +96,15 @@ void parallel_fft(size_type *vec, size_type size, bool invert, int numBlocks, in
     bit_reversal<<<numBlocks, blockSize>>>(vec, size, log2(size));
     cudaDeviceSynchronize();
     check_error(err);
-    //print_vector("parallel bit_reversal vector", vec, size, false);
 
     for (auto len = 2; len <= size; len <<= 1) {
-        size_type wlen = invert ? reverse(ROOT, MOD) : ROOT;
+        size_type w_len = invert ? reverse(ROOT, MOD) : ROOT;
         for (auto i = len; i < ROOT_ORDER; i <<= 1)
-            wlen = size_type(wlen * 1ul * wlen % MOD);
-        //std::cout << "parallel len = " << len << " wlen = " << wlen << std::endl;
-
-        fft_butterflies<<<numBlocks, blockSize>>>(vec, size, len, wlen);
-        //cudaDeviceSynchronize();
-        //check_error(err);
-        //print_vector("parallel fft_butterflies len " + std::to_string(len), vec, size, false);
+            w_len = size_type(w_len * 1ul * w_len % MOD);
+        fft_butterflies<<<numBlocks, blockSize>>>(vec, size, len, w_len);
+        cudaDeviceSynchronize();
+        check_error(err);
     }
-
-    cudaDeviceSynchronize();
-    check_error(err);
 
     if (invert) {
         size_type revSize = reverse(size, MOD);
@@ -176,6 +133,7 @@ int main() {
     cudaMallocManaged(&vector1, ROOT_ORDER * sizeof(size_type));
     cudaMallocManaged(&vector2, ROOT_ORDER * sizeof(size_type));
     if (random) {
+        srand(time(NULL));
         for (auto i = 0; i < ROOT_ORDER / 2; i++) {
             vector1[i] = rand() % MOD;
             vector2[i] = rand() % MOD;
@@ -187,20 +145,16 @@ int main() {
         test_vec2.resize(ROOT_ORDER);
         std::copy(test_vec1.begin(), test_vec1.end(), vector1);
         std::copy(test_vec2.begin(), test_vec2.end(), vector2);
-        /*fft(test_vec1, false);
-        print_vector("fft vector1", test_vec1.data(), ROOT_ORDER, false);
-        fft(test_vec2, false);
-        print_vector("fft vector2", test_vec2.data(), ROOT_ORDER, false);*/
     }
 
-    print_vector("vector1", vector1, ROOT_ORDER, true);
-    print_vector("vector2", vector2, ROOT_ORDER, true);
+    print_array("vector1", vector1, ROOT_ORDER, true);
+    print_array("vector2", vector2, ROOT_ORDER, true);
 
     parallel_fft(vector1, ROOT_ORDER, false, numBlocks, blockSize);
     parallel_fft(vector2, ROOT_ORDER, false, numBlocks, blockSize);
 
-    print_vector("parallel FFT vector1", vector1, ROOT_ORDER, false);
-    print_vector("parallel FFT vector2", vector2, ROOT_ORDER, false);
+    print_array("parallel FFT vector1", vector1, ROOT_ORDER, false);
+    print_array("parallel FFT vector2", vector2, ROOT_ORDER, false);
 
     size_type *res_vec;
     cudaMallocManaged(&res_vec, ROOT_ORDER * sizeof(size_type));
@@ -212,11 +166,11 @@ int main() {
     cudaFree(vector2);
     check_error(err);
 
-    print_vector("multiplied FFT vector", res_vec, ROOT_ORDER, false);
+    print_array("multiplied FFT vector", res_vec, ROOT_ORDER, false);
 
     parallel_fft(res_vec, ROOT_ORDER, true, numBlocks, blockSize);
 
-    print_vector("result", res_vec, ROOT_ORDER, true);
+    print_array("result", res_vec, ROOT_ORDER, true);
 
     cudaFree(res_vec);
     check_error(err);
