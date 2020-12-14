@@ -2,80 +2,41 @@
 #include <stdlib.h>
 #include <vector>
 #include <iostream>
-#include <chrono>
 #include <string>
 
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
-const unsigned long long MOD = 2543537ul;
-const unsigned long long ROOT = 322102ul;
-const unsigned long long ROOT_ORDER = 1ul << 4ul;
+typedef unsigned size_type;
+
+const size_type MOD = 17;
+const size_type ROOT = 3;
+const size_type ROOT_ORDER = 1 << 4;
 
 // бинарное возведение в степень по модулю (a^n(mod))
-unsigned long long binary_pow(unsigned long long a, unsigned long long n, unsigned long long mod) {
-    unsigned long long res = 1ul;
+size_type binary_pow(size_type a, size_type n, size_type mod) {
+    size_type res = 1;
     while (n) {
-        if (n & 1ul) res = res * a % mod;
+        if (n & 1) res = res * a % mod;
         a = a * a % mod;
-        n >>= 1ul;
+        n >>= 1;
     }
     return res;
 }
 
 // находит обратный элемент как n^(mod-2)
-unsigned long long reverse(unsigned long long n, unsigned long long mod) {
+size_type reverse(size_type n, size_type mod) {
     return binary_pow(n, mod - 2, mod);
 }
 
-unsigned long long *generate_roots(unsigned long long *roots_array, unsigned long long root, unsigned long long mod) {
-    roots_array[0] = 1ul;
-    roots_array[1] = root;
-    for (auto i = 2; i < ROOT_ORDER; i++)
-        roots_array[i] = roots_array[i - 1] * root % mod;
-    return roots_array;
-}
-
-__global__ void calc_fft(unsigned long long *fft_vec, unsigned long long *vec, unsigned long long *roots_array) {
-    int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (globalIdx < ROOT_ORDER) {
-        unsigned long long fft_value = 0ul;
-        for (auto j = 0; j < ROOT_ORDER; j++) {
-            fft_value += (vec[j] * roots_array[(j * globalIdx) % ROOT_ORDER]);
-            fft_value %= MOD;
-        }
-        fft_vec[globalIdx] = fft_value;
-    }
-}
-
-__global__ void calc_revert_fft(unsigned long long *vec, unsigned long long *fft_vec, unsigned long long *roots_array,
-    unsigned long long reverse) {
-    unsigned long long globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (globalIdx < ROOT_ORDER) {
-        unsigned long long fft_value = 0ul;
-        for (auto j = 0; j < ROOT_ORDER; j++) {
-            fft_value += (fft_vec[j] * roots_array[(j * globalIdx) % ROOT_ORDER]);
-            fft_value %= MOD;
-        }
-        vec[globalIdx] = fft_value * reverse % MOD;
-    }
-}
-
-__global__ void multiply_vectors(unsigned long long *vec1, unsigned long long *vec2, unsigned long long *res_vec) {
-    int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (globalIdx < ROOT_ORDER)
-        res_vec[globalIdx] = vec1[globalIdx] * vec2[globalIdx] % MOD;
-}
-
-void print_vector(const std::string& name, unsigned long long *vec, bool polynomial) {
+void print_vector(const std::string& name, const size_type *vec, size_type size, bool polynomial) {
     std::cout << name << ": ";
-    for (auto i = 0; i < ROOT_ORDER; i++) {
+    for (auto i = 0; i < size; i++) {
         if (polynomial) {
             if (vec[i] != 0)
                 std::cout << vec[i] << "x^" << i << " ";
-        }
-        else {
-            if (i != ROOT_ORDER - 1)
+        } else {
+            if (i != size - 1)
                 std::cout << vec[i] << ", ";
             else
                 std::cout << vec[i];
@@ -87,53 +48,151 @@ void print_vector(const std::string& name, unsigned long long *vec, bool polynom
 void check_error(cudaError_t err) {
     err = cudaGetLastError();
     if (err != cudaSuccess) {
-        fprintf(stderr, "error code: %s\n", cudaGetErrorString(err));
+        std::cerr << "error code: " << cudaGetErrorString(err) << std::endl;
         exit(EXIT_FAILURE);
     }
+}
+
+void fft(std::vector<size_type>& a, bool invert) {
+    int n = (int)a.size();
+
+    for (int i = 1, j = 0; i < n; ++i) {
+        int bit = n >> 1;
+        for (; j >= bit; bit >>= 1)
+            j -= bit;
+        j += bit;
+        if (i < j)
+            std::swap(a[i], a[j]);
+    }
+
+    for (int len = 2; len <= n; len <<= 1) {
+        int wlen = invert ? reverse(ROOT, MOD) : ROOT;
+        for (int i = len; i < ROOT_ORDER; i <<= 1)
+            wlen = int(wlen * 1ll * wlen % MOD);
+        for (int i = 0; i < n; i += len) {
+            int w = 1;
+            for (int j = 0; j < len / 2; ++j) {
+                int u = a[i + j], v = int(a[i + j + len / 2] * 1ll * w % MOD);
+                a[i + j] = u + v < MOD ? u + v : u + v - MOD;
+                a[i + j + len / 2] = u - v >= 0 ? u - v : u - v + MOD;
+                w = int(w * 1ll * wlen % MOD);
+            }
+        }
+    }
+
+    if (invert) {
+        int nrev = reverse(n, MOD);
+        for (int i = 0; i < n; ++i)
+            a[i] = int(a[i] * 1ll * nrev % MOD);
+    }
+}
+
+__global__ void bit_reversal(size_type *vec, size_type size, size_type sizeLog2) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < size; i += blockDim.x * gridDim.x) {
+        auto bitsNumber = sizeof(i) * 8;
+        size_type reverse_i = 0;
+        for (auto j = 0; j < bitsNumber; j++)
+            if ((i & (1 << j)))
+                reverse_i |= 1 << ((bitsNumber - 1) - j);
+        reverse_i >>= (bitsNumber - sizeLog2);
+        if (i < reverse_i) {
+            size_type temp = vec[i];
+            vec[i] = vec[reverse_i];
+            vec[reverse_i] = temp;
+        }
+    }
+}
+
+__global__ void fft_butterflies(size_type *vec, size_type size, size_type len, size_type wlen) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < size && i % len == 0; i += blockDim.x * gridDim.x) {
+        int w = 1;
+        for (int j = 0; j < len / 2; ++j) {
+            int u = vec[i + j], v = int(vec[i + j + len / 2] * 1ll * w % MOD);
+            vec[i + j] = u + v < MOD ? u + v : u + v - MOD;
+            vec[i + j + len / 2] = u - v >= 0 ? u - v : u - v + MOD;
+            w = int(w * 1ll * wlen % MOD);
+        }
+    }
+}
+
+__global__ void invert_fft_result(size_type *vec, size_type size, size_type nrev) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < size; i += blockDim.x * gridDim.x) {
+        vec[i] = int(vec[i] * 1ll * nrev % MOD);
+    }
+}
+
+void parallel_fft(size_type *vec, size_type size, bool invert, int numBlocks, int blockSize) {
+    cudaError_t err = cudaSuccess;
+
+    bit_reversal <<<numBlocks, blockSize>>>(vec, size, log2(size));
+
+    cudaDeviceSynchronize();
+    check_error(err);
+
+    for (int len = 2; len <= size; len <<= 1) {
+        int wlen = invert ? reverse(ROOT, MOD) : ROOT;
+        for (int i = len; i < ROOT_ORDER; i <<= 1)
+            wlen = int(wlen * 1ll * wlen % MOD);
+
+        fft_butterflies<<<numBlocks, blockSize>>>(vec, size, len, wlen);
+    }
+
+    cudaDeviceSynchronize();
+    check_error(err);
+
+    if (invert) {
+        int nrev = reverse(size, MOD);
+        invert_fft_result<<<numBlocks, blockSize>>>(vec, size, nrev);
+        cudaDeviceSynchronize();
+        check_error(err);
+    }
+}
+
+__global__ void multiply_vectors(size_type *vec1, size_type *vec2, size_type *res_vec) {
+    int globalIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (globalIdx < ROOT_ORDER)
+        res_vec[globalIdx] = vec1[globalIdx] * vec2[globalIdx] % MOD;
 }
 
 int main() {
     cudaError_t err = cudaSuccess;
     int blockSize = 512;
-    unsigned long long numBlocks = (ROOT_ORDER + blockSize - 1) / blockSize;
+    size_type numBlocks = (ROOT_ORDER + blockSize - 1) / blockSize;
 
     bool random = true;
     std::cout << "random values - 1, hardcoded values - 0: ";
     std::cin >> random;
     std::cout << std::endl;
 
-    unsigned long long *vector1, *vector2;
-    cudaMallocManaged(&vector1, ROOT_ORDER * sizeof(unsigned long long));
-    cudaMallocManaged(&vector2, ROOT_ORDER * sizeof(unsigned long long));
+    size_type *vector1, *vector2;
+    cudaMallocManaged(&vector1, ROOT_ORDER * sizeof(size_type));
+    cudaMallocManaged(&vector2, ROOT_ORDER * sizeof(size_type));
     if (random) {
         for (auto i = 0; i < ROOT_ORDER / 2; i++) {
             vector1[i] = rand() % MOD;
             vector2[i] = rand() % MOD;
         }
-    }
-    else {
-        std::vector<unsigned long long> test_vec1 = { 41, 314, 283, 279 };
-        std::vector<unsigned long long> test_vec2 = { 1016, 1605, 1393 };
+    } else {
+        std::vector<size_type> test_vec1 = { 7, 8, 3, 4 };
+        std::vector<size_type> test_vec2 = { 9, 5, 16 };
         test_vec1.resize(ROOT_ORDER);
         test_vec2.resize(ROOT_ORDER);
         std::copy(test_vec1.begin(), test_vec1.end(), vector1);
         std::copy(test_vec2.begin(), test_vec2.end(), vector2);
     }
-    print_vector("vector1", vector1, true);
-    print_vector("vector2", vector2, true);
 
-    unsigned long long *roots_array;
-    cudaMallocManaged(&roots_array, ROOT_ORDER * sizeof(unsigned long long));
-    roots_array = generate_roots(roots_array, ROOT, MOD);
-    print_vector("roots", roots_array, false);
+    print_vector("vector1", vector1, ROOT_ORDER, true);
+    print_vector("vector2", vector2, ROOT_ORDER, true);
 
-    unsigned long long *fft_vec1, *fft_vec2;
-    cudaMallocManaged(&fft_vec1, ROOT_ORDER * sizeof(unsigned long long));
-    cudaMallocManaged(&fft_vec2, ROOT_ORDER * sizeof(unsigned long long));
-    calc_fft << < numBlocks, blockSize >> > (fft_vec1, vector1, roots_array);
-    cudaDeviceSynchronize();
-    check_error(err);
-    calc_fft << < numBlocks, blockSize >> > (fft_vec2, vector2, roots_array);
+    parallel_fft(vector1, ROOT_ORDER, false, numBlocks, blockSize);
+    parallel_fft(vector2, ROOT_ORDER, false, numBlocks, blockSize);
+
+    print_vector("parallel FFT vector1", vector1, ROOT_ORDER, false);
+    print_vector("parallel FFT vector2", vector2, ROOT_ORDER, false);
+
+    size_type *res_vec;
+    cudaMallocManaged(&res_vec, ROOT_ORDER * sizeof(size_type));
+    multiply_vectors<<<numBlocks, blockSize>>>(vector1, vector2, res_vec);
     cudaDeviceSynchronize();
     check_error(err);
 
@@ -141,32 +200,12 @@ int main() {
     cudaFree(vector2);
     check_error(err);
 
-    print_vector("FFT vector1", fft_vec1, false);
-    print_vector("FFT vector2", fft_vec2, false);
+    print_vector("multiplied FFT vector", res_vec, ROOT_ORDER, false);
 
-    unsigned long long *res_vec, *rev_fft_vec;
-    cudaMallocManaged(&res_vec, ROOT_ORDER * sizeof(unsigned long long));
-    cudaMallocManaged(&rev_fft_vec, ROOT_ORDER * sizeof(unsigned long long));
-    multiply_vectors << < numBlocks, blockSize >> > (fft_vec1, fft_vec2, res_vec);
-    cudaDeviceSynchronize();
-    check_error(err);
+    parallel_fft(res_vec, ROOT_ORDER, true, numBlocks, blockSize);
 
-    cudaFree(fft_vec1);
-    cudaFree(fft_vec2);
-    check_error(err);
-
-    print_vector("multiplied FFT vector", res_vec, false);
-
-    for (auto i = 0; i < ROOT_ORDER; i++)
-        roots_array[i] = reverse(roots_array[i], MOD);
-
-    calc_revert_fft << < numBlocks, blockSize >> > (rev_fft_vec, res_vec, roots_array, reverse(ROOT_ORDER, MOD));
-    cudaDeviceSynchronize();
-    check_error(err);
-    print_vector("result", rev_fft_vec, true);
+    print_vector("result", res_vec, ROOT_ORDER, true);
 
     cudaFree(res_vec);
-    cudaFree(rev_fft_vec);
-    cudaFree(roots_array);
     check_error(err);
 }
