@@ -34,10 +34,13 @@ size_type reverse(size_type n, size_type mod) {
 
 void print_array(const std::string &name, const size_type *vec, size_type size, bool polynomial) {
     std::cout << name << ": ";
+    bool allZeros = true;
     for (auto i = 0; i < size; i++) {
         if (polynomial) {
-            if (vec[i] != 0)
+            if (vec[i] != 0) {
+                allZeros = false;
                 std::cout << vec[i] << "x^" << i << " ";
+            }
         } else {
             if (i != size - 1)
                 std::cout << vec[i] << ", ";
@@ -45,6 +48,8 @@ void print_array(const std::string &name, const size_type *vec, size_type size, 
                 std::cout << vec[i];
         }
     }
+    if (allZeros)
+        std::cout << 0;
     std::cout << std::endl;
 }
 
@@ -93,7 +98,7 @@ __global__ void invert_fft_result(size_type *vec, size_type size, size_type revS
 
 void parallel_fft(size_type *vec, size_type size, bool invert, int numBlocks, int blockSize) {
     cudaError_t err = cudaSuccess;
-    bit_reversal<<<numBlocks, blockSize>>>(vec, size, log2(size));
+    bit_reversal << <numBlocks, blockSize >> > (vec, size, log2(size));
     cudaDeviceSynchronize();
     check_error(err);
 
@@ -101,14 +106,14 @@ void parallel_fft(size_type *vec, size_type size, bool invert, int numBlocks, in
         size_type w_len = invert ? reverse(ROOT, MOD) : ROOT;
         for (auto i = len; i < ROOT_ORDER; i <<= 1)
             w_len = size_type(w_len * 1ul * w_len % MOD);
-        fft_butterflies<<<numBlocks, blockSize>>>(vec, size, len, w_len);
+        fft_butterflies << <numBlocks, blockSize >> > (vec, size, len, w_len);
         cudaDeviceSynchronize();
         check_error(err);
     }
 
     if (invert) {
         size_type revSize = reverse(size, MOD);
-        invert_fft_result<<<numBlocks, blockSize>>>(vec, size, revSize);
+        invert_fft_result << <numBlocks, blockSize >> > (vec, size, revSize);
         cudaDeviceSynchronize();
         check_error(err);
     }
@@ -124,28 +129,22 @@ int main() {
     int blockSize = 256;
     auto numBlocks = (ROOT_ORDER + blockSize - 1) / blockSize;
 
-    bool random = true;
-    std::cout << "random values - 1, hardcoded values - 0: ";
-    std::cin >> random;
-    std::cout << std::endl;
-
     size_type *vector1, *vector2;
     cudaMallocManaged(&vector1, ROOT_ORDER * sizeof(size_type));
     cudaMallocManaged(&vector2, ROOT_ORDER * sizeof(size_type));
-    if (random) {
-        srand(time(NULL));
-        for (auto i = 0; i < ROOT_ORDER / 2; i++) {
-            vector1[i] = rand() % MOD;
-            vector2[i] = rand() % MOD;
-        }
-    } else {
-        std::vector<size_type> test_vec1 = { 41, 6334, 19169, 11478 };
-        std::vector<size_type> test_vec2 = { 18467, 26500, 15724, 29358 };
-        test_vec1.resize(ROOT_ORDER);
-        test_vec2.resize(ROOT_ORDER);
-        std::copy(test_vec1.begin(), test_vec1.end(), vector1);
-        std::copy(test_vec2.begin(), test_vec2.end(), vector2);
-    }
+
+    size_type degree;
+    std::cout << "Enter first polynomial degree: ";
+    std::cin >> degree;
+    std::cout << "Enter first polynomial coefficients: ";
+    for (auto i = 0; i < degree; ++i)
+        std::cin >> vector1[i];
+    
+    std::cout << "Enter second polynomial degree: ";
+    std::cin >> degree;
+    std::cout << "Enter second polynomial coefficients: ";
+    for (auto i = 0; i < degree; ++i)
+        std::cin >> vector2[i];
 
     print_array("vector1", vector1, ROOT_ORDER, true);
     print_array("vector2", vector2, ROOT_ORDER, true);
@@ -158,7 +157,7 @@ int main() {
 
     size_type *res_vec;
     cudaMallocManaged(&res_vec, ROOT_ORDER * sizeof(size_type));
-    multiply_vectors<<<numBlocks, blockSize>>>(vector1, vector2, res_vec, ROOT_ORDER);
+    multiply_vectors << <numBlocks, blockSize >> > (vector1, vector2, res_vec, ROOT_ORDER);
     cudaDeviceSynchronize();
     check_error(err);
 
